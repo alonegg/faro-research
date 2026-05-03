@@ -20,13 +20,10 @@ import textwrap
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any
 
 from faro_research.config import settings
 from faro_research.providers.base import Message, Provider
 from faro_research.tools.registry import ToolRegistry, truncate_result
-from faro_research.tools.types import ToolCall
-
 
 DEFAULT_SYSTEM_PROMPT = textwrap.dedent("""\
     You are a research assistant for Chinese A-share equities. All data must

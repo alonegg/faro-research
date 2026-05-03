@@ -15,7 +15,7 @@ Quick start::
 See README.md for plugin authoring + server / Docker deployment.
 """
 
-from faro_research.agent import Agent, AgentTrace, DEFAULT_SYSTEM_PROMPT, Message
+from faro_research.agent import DEFAULT_SYSTEM_PROMPT, Agent, AgentTrace, Message
 from faro_research.audit import SessionStore
 from faro_research.providers import (
     AnthropicProvider,

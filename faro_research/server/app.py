@@ -20,9 +20,8 @@ or by importing `make_app(registry=..., agent=...)` from your own bootstrap.
 from __future__ import annotations
 
 import json
-from typing import Optional
 
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -33,7 +32,6 @@ from faro_research.config import settings
 from faro_research.providers import make_provider
 from faro_research.tools import ToolRegistry
 from faro_research.tools.builtin.tushare import tushare_tools
-
 
 # ────────────────────────────────────────────────────────────────────────────
 # Default singletons — override via `make_app()`
@@ -52,7 +50,7 @@ def _default_registry() -> ToolRegistry:
 
 
 class CreateSessionBody(BaseModel):
-    title: Optional[str] = None
+    title: str | None = None
 
 
 class RenameBody(BaseModel):

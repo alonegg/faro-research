@@ -16,7 +16,6 @@ import json
 import secrets
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
@@ -156,7 +155,7 @@ class SessionStore:
         role: str,
         content: str,
         *,
-        meta: Optional[dict] = None,
+        meta: dict | None = None,
     ) -> ChatMessage:
         with Session(self.engine) as db:
             existing = db.exec(
