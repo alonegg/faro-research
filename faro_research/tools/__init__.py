@@ -1,4 +1,7 @@
-from faro_research.tools.registry import ToolRegistry, truncate_result
-from faro_research.tools.types import ToolCall, ToolResult, ToolSpec
+from faro_research.tools.registry import ToolRegistry, render_for_llm, truncate_result
+from faro_research.tools.types import ToolCall, ToolFormatter, ToolResult, ToolSpec
 
-__all__ = ["ToolRegistry", "truncate_result", "ToolCall", "ToolResult", "ToolSpec"]
+__all__ = [
+    "ToolRegistry", "render_for_llm", "truncate_result",
+    "ToolCall", "ToolResult", "ToolSpec", "ToolFormatter",
+]
