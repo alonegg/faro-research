@@ -1,0 +1,34 @@
+# `docker compose up --build` then open http://localhost:5173
+#
+# Persists SQLite to ./data/. Env vars resolved from .env at compose level
+# (so the backend container also sees TUSHARE_TOKEN / FARO_OPENAI_API_KEY).
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    env_file: .env
+    environment:
+      FARO_DB_PATH: /app/data/faro.db
+      FARO_CORS_ORIGINS: http://localhost:5173
+    volumes:
+      - ./data:/app/data
+    expose:
+      - "8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/api/health').raise_for_status()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+    restart: unless-stopped
