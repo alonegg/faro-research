@@ -1,0 +1,154 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────
+  # Python: import + unit-style smoke (no network, no LLM)
+  # ────────────────────────────────────────────────────────────────────────
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package (server extra)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[server,dev]"
+
+      - name: Ruff lint
+        run: ruff check faro_research
+
+      - name: Smoke imports + tool registry shape
+        env:
+          FARO_OPENAI_API_KEY: ci-stub
+          FARO_PROVIDER: openai_compat
+          TUSHARE_TOKEN: ci-stub
+          FARO_DB_PATH: /tmp/faro-ci.db
+        run: |
+          python - <<'PY'
+          from faro_research import Agent, Message, ToolRegistry, make_provider
+          from faro_research.tools.builtin.tushare import tushare_tools
+          from faro_research.audit import SessionStore
+
+          # 1. Tools register cleanly
+          reg = ToolRegistry()
+          reg.register_many(tushare_tools())
+          names = reg.names()
+          assert names == [
+              "resolve_ticker", "get_stock_quote", "get_key_ratios",
+              "get_three_statements", "get_holder_trades",
+          ], names
+          assert len(reg) == 5
+
+          # 2. Provider builds (with stub keys; we don't actually call chat)
+          p = make_provider()
+          assert p.name == "openai_compat"
+
+          # 3. Agent constructs
+          a = Agent(provider=p, tools=reg)
+          assert a.max_turns == 8
+
+          # 4. Session store roundtrip
+          st = SessionStore()
+          s = st.create_session(title="ci")
+          st.append_message(s.id, "user", "hello")
+          msgs = st.list_messages(s.id)
+          assert len(msgs) == 1 and msgs[0].role == "user"
+          assert st.delete_session(s.id) is True
+
+          print("smoke ok")
+          PY
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Docker: build both images, boot via compose, hit health endpoints
+  # ────────────────────────────────────────────────────────────────────────
+  docker:
+    runs-on: ubuntu-latest
+    needs: python
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Write CI .env (no real secrets — agent calls won't be tested)
+        run: |
+          cat > .env <<'EOF'
+          FARO_PROVIDER=openai_compat
+          FARO_OPENAI_BASE_URL=https://api.deepseek.com
+          FARO_OPENAI_API_KEY=ci-stub
+          FARO_OPENAI_MODEL=deepseek-chat
+          TUSHARE_TOKEN=ci-stub
+          FARO_DB_PATH=/app/data/faro.db
+          FARO_CORS_ORIGINS=http://localhost:5173
+          EOF
+
+      - name: Build images
+        run: docker compose build
+
+      - name: Start stack
+        run: docker compose up -d
+
+      - name: Wait for backend health
+        run: |
+          for i in $(seq 1 30); do
+            if docker compose exec -T backend python -c "import httpx; r = httpx.get('http://localhost:8000/api/health'); r.raise_for_status(); print(r.json())" 2>/dev/null; then
+              echo "backend healthy"
+              exit 0
+            fi
+            echo "waiting... ($i)"
+            sleep 2
+          done
+          echo "backend never healthy"
+          docker compose logs backend
+          exit 1
+
+      - name: Verify /api/tools exposes 5 tools
+        run: |
+          docker compose exec -T backend python - <<'PY'
+          import httpx
+          tools = httpx.get("http://localhost:8000/api/tools").json()
+          names = [t["name"] for t in tools]
+          assert len(tools) == 5, names
+          assert "resolve_ticker" in names
+          print("tools ok:", names)
+          PY
+
+      - name: Verify session create + list
+        run: |
+          docker compose exec -T backend python - <<'PY'
+          import httpx
+          base = "http://localhost:8000/api"
+          s = httpx.post(f"{base}/sessions", json={"title": "ci"}).json()
+          assert s["id"].startswith("s-"), s
+          all_ = httpx.get(f"{base}/sessions").json()
+          assert any(x["id"] == s["id"] for x in all_)
+          httpx.delete(f"{base}/sessions/{s['id']}").raise_for_status()
+          print("sessions ok")
+          PY
+
+      - name: Verify web container serves UI shell
+        run: |
+          # web container exposes port 80; compose maps to 5173 on host
+          curl -fsS http://localhost:5173/ | grep -q "Faro Research" && echo "ui ok"
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs

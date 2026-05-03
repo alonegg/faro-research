@@ -1,0 +1,14 @@
+.git/
+.github/
+.venv/
+__pycache__/
+*.pyc
+data/
+*.db
+.env
+.env.local
+
+# Frontend build artefacts — re-built inside the container
+web/node_modules/
+web/dist/
+web/tsconfig.tsbuildinfo
