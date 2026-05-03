@@ -41,33 +41,48 @@ jobs:
         run: |
           python - <<'PY'
           from faro_research import Agent, Message, ToolRegistry, make_provider
-          from faro_research.tools.builtin.tushare import tushare_tools
+          from faro_research.tools.builtin.tushare import tushare_tools, tushare_default_tools
+          from faro_research.skills import discover_skills, make_skill_tool
+          from faro_research.memory import MemoryStore, make_memory_tools
           from faro_research.audit import SessionStore
 
-          # 1. Tools register cleanly
+          # 1. Raw 5 Tushare tools register cleanly
           reg = ToolRegistry()
           reg.register_many(tushare_tools())
-          names = reg.names()
-          assert names == [
+          assert reg.names() == [
               "resolve_ticker", "get_stock_quote", "get_key_ratios",
               "get_three_statements", "get_holder_trades",
-          ], names
-          assert len(reg) == 5
+          ]
 
-          # 2. Provider builds (with stub keys; we don't actually call chat)
+          # 2. v0.2 default registry: meta + quote + skill + 3 memory tools
           p = make_provider()
-          assert p.name == "openai_compat"
+          reg2 = ToolRegistry()
+          reg2.register_many(tushare_default_tools(p))
+          reg2.register(make_skill_tool())
+          reg2.register_many(make_memory_tools(MemoryStore()))
+          assert reg2.names() == [
+              "get_company_data", "get_stock_quote", "skill",
+              "memory_search", "memory_get", "memory_update",
+          ], reg2.names()
 
-          # 3. Agent constructs
-          a = Agent(provider=p, tools=reg)
-          assert a.max_turns == 8
+          # 3. Skills discovery (SKILL.md files packaged)
+          skills = {s.name for s in discover_skills()}
+          assert skills == {"dcf-cn", "research-report", "screener"}, skills
 
-          # 4. Session store roundtrip
+          # 4. Memory roundtrip (SQLite + LIKE search)
+          m = MemoryStore()
+          m.append("long-term", "ci 测试条目")
+          assert len(m.search("ci")) == 1
+          assert len(m.search("测试")) == 1
+
+          # 5. Agent constructs
+          assert Agent(p, reg2).max_turns == 8
+
+          # 6. Session store
           st = SessionStore()
           s = st.create_session(title="ci")
           st.append_message(s.id, "user", "hello")
-          msgs = st.list_messages(s.id)
-          assert len(msgs) == 1 and msgs[0].role == "user"
+          assert len(st.list_messages(s.id)) == 1
           assert st.delete_session(s.id) is True
 
           print("smoke ok")

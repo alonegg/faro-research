@@ -108,6 +108,31 @@ class AgentTrace:
         }
 
 
+def build_system_prompt(
+    *,
+    base: str = DEFAULT_SYSTEM_PROMPT,
+    soul: str | None = None,
+    rules: str | None = None,
+) -> str:
+    """Splice user-supplied identity (SOUL.md) and research rules (RULES.md)
+    into the base system prompt. Order: base → rules → soul, so identity
+    flavour comes last and most strongly colours tone."""
+    parts = [base]
+    if rules:
+        parts.append(
+            "\n# 用户研究规则 (RULES.md)\n\n"
+            "以下是用户为本研究项目设置的硬规则,**每次回答前必须遵守**:\n\n"
+            f"{rules.strip()}\n"
+        )
+    if soul:
+        parts.append(
+            "\n# 用户身份 / 研究哲学 (SOUL.md)\n\n"
+            "Embody 以下身份与投资哲学,让它影响你的语气、价值判断与提问方式:\n\n"
+            f"{soul.strip()}\n"
+        )
+    return "\n".join(parts)
+
+
 class Agent:
     """Wraps a Provider + ToolRegistry + system prompt.
 
@@ -263,4 +288,4 @@ class Agent:
         )
 
 
-__all__ = ["Agent", "AgentTrace", "DEFAULT_SYSTEM_PROMPT", "Message"]
+__all__ = ["Agent", "AgentTrace", "DEFAULT_SYSTEM_PROMPT", "Message", "build_system_prompt"]

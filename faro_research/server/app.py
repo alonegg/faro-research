@@ -26,21 +26,34 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from faro_research.agent import Agent, Message
+from faro_research.agent import Agent, Message, build_system_prompt
 from faro_research.audit import SessionStore
 from faro_research.config import settings
-from faro_research.providers import make_provider
+from faro_research.memory import MemoryStore, make_memory_tools
+from faro_research.providers import Provider, make_provider
+from faro_research.skills import make_skill_tool
 from faro_research.tools import ToolRegistry
-from faro_research.tools.builtin.tushare import tushare_tools
+from faro_research.tools.builtin.tushare import tushare_default_tools
 
 # ────────────────────────────────────────────────────────────────────────────
 # Default singletons — override via `make_app()`
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def _default_registry() -> ToolRegistry:
+def _default_registry(provider: Provider, memory: MemoryStore) -> ToolRegistry:
+    """Default agent tools.
+
+    Layers (in order added):
+      1. Tushare meta-tool + get_stock_quote (data)
+      2. skill tool (workflows, if any SKILL.md files discovered)
+      3. memory_search / memory_get / memory_update (recall)
+    """
     reg = ToolRegistry()
-    reg.register_many(tushare_tools())
+    reg.register_many(tushare_default_tools(provider))
+    skill = make_skill_tool()
+    if skill is not None:
+        reg.register(skill)
+    reg.register_many(make_memory_tools(memory))
     return reg
 
 
@@ -106,8 +119,11 @@ def make_app(
 
     For zero-config use, `from faro_research.server.app import app` works
     (it calls `make_app()` with defaults at import time)."""
-    reg = registry or _default_registry()
-    ag = agent or Agent(provider=make_provider(), tools=reg)
+    provider = make_provider()
+    memory = MemoryStore()
+    reg = registry or _default_registry(provider, memory)
+    sys_prompt = build_system_prompt(soul=memory.soul(), rules=memory.rules())
+    ag = agent or Agent(provider=provider, tools=reg, system_prompt=sys_prompt)
     st = store or SessionStore()
 
     app = FastAPI(

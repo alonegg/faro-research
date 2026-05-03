@@ -3,6 +3,7 @@ from faro_research.agent.core import (
     Agent,
     AgentTrace,
     Message,
+    build_system_prompt,
 )
 
-__all__ = ["Agent", "AgentTrace", "Message", "DEFAULT_SYSTEM_PROMPT"]
+__all__ = ["Agent", "AgentTrace", "Message", "DEFAULT_SYSTEM_PROMPT", "build_system_prompt"]

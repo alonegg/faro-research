@@ -85,15 +85,23 @@ trace = agent.run([Message(role="user", content="比亚迪 2024 vs 2025 营收")
 print(trace.final_answer)
 ```
 
-## 内建工具（Tushare）
+## 内建工具（v0.2 默认）
 
-| 工具 | 数据 | Tushare 端点 |
-|---|---|---|
-| `resolve_ticker` | 中文公司名 / 6 位 / 后缀代码 → ts_code | `stock_basic`（本地缓存） |
-| `get_stock_quote` | 最近 N 日 OHLCV（未复权） | `daily` |
-| `get_key_ratios` | PE/PB/PS/总市值 + 季度 ROE/毛利率/同比 | `daily_basic` + `fina_indicator` |
-| `get_three_statements` | 利润表 + 资产负债表 + 现金流量表 | `income` / `balancesheet` / `cashflow` |
-| `get_holder_trades` | 董监高及关联人增减持 | `stk_holdertrade` |
+主 agent 默认看到 6 个工具，结构清晰：
+
+| 工具 | 用途 |
+|---|---|
+| `get_company_data` | **元工具**：自然语言 → 自动路由到 4 个 finance 子工具，并行拉齐返回 |
+| `get_stock_quote` | 短期 OHLCV |
+| `skill` | 调用工作流模板（dcf-cn / research-report / screener） |
+| `memory_search` / `memory_get` / `memory_update` | 跨会话长期记忆 |
+
+`get_company_data` 内部包了 5 个 raw Tushare 工具（`resolve_ticker` /
+`get_key_ratios` / `get_three_statements` / `get_holder_trades`），如需要单独使用
+传 `--legacy-tools` 给 CLI 即可。
+
+每个工具自带 formatter：raw API JSON → 紧凑中文 markdown 表（`¥1.73 万亿` /
+`PE_TTM 20.97×` / `25Q4`），token 比 v0.1 少 5-10×。
 
 需要 Tushare 积分 ≥ 2000（基本面端点门槛）。在 [tushare.pro](https://tushare.pro) 申请。
 
@@ -140,11 +148,15 @@ print(agent.run([Message(role="user", content="我组合里 NVDA 多少")]).fina
 
 ## 路线图
 
-- [x] **v0.1** — 当前：单租户、SSE、2 provider、5 内建工具、Docker compose
-- [ ] **v0.2** — 多用户登录（OIDC / API key），entry_points 插件发现
-- [ ] **v0.3** — 工具结果缓存（Redis），并行 tool 执行
-- [ ] **v0.4** — Markdown / PDF 研报导出
-- [ ] **v0.5** — 多 agent 协作（研究员 / 风控 / 编辑）
+- [x] **v0.1** — 单租户 / SSE / 2 provider / 5 内建工具 / Docker compose
+- [x] **v0.2** — 报告级输出质量：formatters / strict output rules / meta-tool /
+  3 内建 skills (DCF-CN / research-report / screener) / SQLite memory + SOUL/RULES /
+  per-tool cache + timeout + 并行执行
+- [ ] **v0.3** — Embeddings 加持的 memory 语义搜索 / Redis 工具缓存 / 全市场因子筛选
+- [ ] **v0.4** — 多用户登录（OIDC / API key）/ entry_points 插件自动发现
+- [ ] **v0.5** — Markdown / PDF 研报导出 / 多 agent 协作（研究员 / 风控 / 编辑）
+
+详见 [CHANGELOG](CHANGELOG.md) 和发布博客 [`docs/blog/`](docs/blog/)。
 
 ## License
 

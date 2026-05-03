@@ -11,16 +11,28 @@ import argparse
 import json
 import sys
 
-from faro_research.agent import Agent, Message
+from faro_research.agent import Agent, Message, build_system_prompt
+from faro_research.memory import MemoryStore, make_memory_tools
 from faro_research.providers import make_provider
+from faro_research.skills import make_skill_tool
 from faro_research.tools import ToolRegistry
-from faro_research.tools.builtin.tushare import tushare_tools
+from faro_research.tools.builtin.tushare import tushare_default_tools, tushare_tools
 
 
-def _build_default_agent() -> Agent:
+def _build_default_agent(legacy_tools: bool = False) -> Agent:
+    provider = make_provider()
+    memory = MemoryStore()
     reg = ToolRegistry()
-    reg.register_many(tushare_tools())
-    return Agent(provider=make_provider(), tools=reg)
+    if legacy_tools:
+        reg.register_many(tushare_tools())                   # 5 raw tools
+    else:
+        reg.register_many(tushare_default_tools(provider))   # meta + quote
+    skill = make_skill_tool()
+    if skill is not None:
+        reg.register(skill)
+    reg.register_many(make_memory_tools(memory))
+    sys_prompt = build_system_prompt(soul=memory.soul(), rules=memory.rules())
+    return Agent(provider=provider, tools=reg, system_prompt=sys_prompt)
 
 
 def main() -> int:
@@ -33,11 +45,15 @@ def main() -> int:
         "--quiet", "-q", action="store_true",
         help="Hide tool-call trace, only print final answer.",
     )
+    p.add_argument(
+        "--legacy-tools", action="store_true",
+        help="Expose all 5 raw Tushare tools instead of the meta-tool default.",
+    )
     args = p.parse_args()
     query = " ".join(args.query)
 
     try:
-        agent = _build_default_agent()
+        agent = _build_default_agent(legacy_tools=args.legacy_tools)
     except Exception as e:
         print(f"setup failed: {type(e).__name__}: {e}", file=sys.stderr)
         return 2

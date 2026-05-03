@@ -46,6 +46,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["faro_research"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"faro_research/skills/builtin" = "faro_research/skills/builtin"
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

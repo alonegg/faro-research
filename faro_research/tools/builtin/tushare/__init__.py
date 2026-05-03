@@ -255,11 +255,39 @@ _GET_HOLDER_TRADES = ToolSpec(
 
 
 def tushare_tools() -> list[ToolSpec]:
-    """Return all 5 builtin Tushare-backed ToolSpecs as a fresh list."""
+    """All 5 raw Tushare ToolSpecs — fine-grained control.
+
+    Use this when you want to see every sub-tool call in the agent trace,
+    or when you want the LLM to pick tools individually (rather than via the
+    LLM-router meta-tool).
+
+    For most users, prefer `tushare_default_tools(provider)` which returns
+    the meta-tool + get_stock_quote — fewer choices for the main agent, faster
+    answers, and cleaner traces.
+    """
     return [
         _RESOLVE_TICKER, _GET_STOCK_QUOTE, _GET_KEY_RATIOS,
         _GET_THREE_STATEMENTS, _GET_HOLDER_TRADES,
     ]
 
 
-__all__ = ["tushare_tools", "client"]
+def tushare_default_tools(provider) -> list[ToolSpec]:
+    """Recommended default: meta-tool (consolidates 4 finance sub-tools) +
+    get_stock_quote (kept separate because price queries are simple).
+
+    Internally the meta-tool runs resolve_ticker / get_key_ratios /
+    get_three_statements / get_holder_trades through a private sub-registry,
+    routed by an LLM call on `provider`.
+    """
+    from faro_research.tools.builtin.meta import make_meta_tool
+    from faro_research.tools.registry import ToolRegistry
+
+    sub = ToolRegistry()
+    sub.register(_RESOLVE_TICKER)
+    sub.register(_GET_KEY_RATIOS)
+    sub.register(_GET_THREE_STATEMENTS)
+    sub.register(_GET_HOLDER_TRADES)
+    return [make_meta_tool(provider, sub), _GET_STOCK_QUOTE]
+
+
+__all__ = ["tushare_tools", "tushare_default_tools", "client"]
