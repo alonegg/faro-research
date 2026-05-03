@@ -61,13 +61,17 @@ class MemoryStore:
         (self.root / "daily").mkdir(exist_ok=True)
         (self.root / "identity").mkdir(exist_ok=True)
         self._db_path = self.root / ".index.sqlite"
+        # isolation_level=None → autocommit, avoids the implicit transactions
+        # that Python's sqlite3 wraps around DML; combined with WAL, this lets
+        # multiple MemoryStore connections (CLI / server / tests) coexist on
+        # the same file without deadlock.
         self._conn = sqlite3.connect(
-            str(self._db_path), check_same_thread=False, timeout=10.0,
+            str(self._db_path), check_same_thread=False,
+            timeout=10.0, isolation_level=None,
         )
         self._conn.row_factory = sqlite3.Row
-        # WAL + busy_timeout — enables multiple concurrent connections from
-        # CLI, server, and tests to share the same db file without deadlock.
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        # IMPORTANT: must fetchone() the PRAGMA result for WAL to actually apply
+        self._conn.execute("PRAGMA journal_mode=WAL").fetchone()
         self._conn.execute("PRAGMA busy_timeout=10000")
         self._init_schema()
 
