@@ -2,6 +2,7 @@
 
 > 中国 A 股 / 港股 / 美股 ADR 深度研究 Agent，工具可插拔，多 LLM provider，自带 Web UI。
 
+[![CI](https://github.com/alonegg/faro-research/actions/workflows/ci.yml/badge.svg)](https://github.com/alonegg/faro-research/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Status: Alpha](https://img.shields.io/badge/status-alpha-orange)
 
