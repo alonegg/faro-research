@@ -61,8 +61,14 @@ class MemoryStore:
         (self.root / "daily").mkdir(exist_ok=True)
         (self.root / "identity").mkdir(exist_ok=True)
         self._db_path = self.root / ".index.sqlite"
-        self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        self._conn = sqlite3.connect(
+            str(self._db_path), check_same_thread=False, timeout=10.0,
+        )
         self._conn.row_factory = sqlite3.Row
+        # WAL + busy_timeout — enables multiple concurrent connections from
+        # CLI, server, and tests to share the same db file without deadlock.
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=10000")
         self._init_schema()
 
     # ── schema ──────────────────────────────────────────────────────────
