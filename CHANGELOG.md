@@ -4,6 +4,36 @@ All notable changes to **Faro Research** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org).
 
+## [0.3.0] — 2026-05-03 — 生态扩展
+
+让别人能 `pip install + 用上`,而不只是 fork 改源码。
+
+### Added — 插件生态
+
+- **`entry_points` 自动插件发现** —— 第三方包在 `pyproject.toml` 写一行
+  `[project.entry-points."faro_research.tools"] foo = "my_pkg:tools"`,
+  `pip install` 后 Faro CLI / server 启动时自动注册。无需手改 registry。
+- **fund/ FOF plugin 实例**: `app.faro_plugin.fof_tools` 暴露
+  `get_portfolio_context` + `simulate_solver` ToolSpec,演示真实场景。
+- **Pluggable Cache 抽象** —— `ToolRegistry(cache=...)`:
+  - `InMemoryCache` (默认): 进程内 dict + TTL,零依赖
+  - `RedisCache`: 跨进程共享,激活方式 `FARO_CACHE=redis://host:6379/0`,
+    依赖 `pip install "faro-research[redis]"`. Redis 不可用自动降级到内存。
+
+### Added — Memory 增强
+
+- **混合搜索 (LIKE ∪ embeddings)**: `MemoryStore.search` 加权合并:
+  - LIKE 层(默认): 中文短查询精确匹配
+  - Embedding 层(opt-in): 设 `FARO_EMBED_BASE_URL` + `FARO_EMBED_API_KEY` +
+    `FARO_EMBED_MODEL` 启用语义召回; 兼容 OpenAI / Moonshot / Ollama / Voyage
+- 嵌入向量存 SQLite `mem_emb` 表,无需 sentence-transformers / faiss
+
+### Changed
+- 默认 `_default_registry` 自动调 `discover_external_tools()` 注册外部插件
+- README + CHANGELOG 更新到 v0.3 范围
+- `faro-research` 包版本 0.2.0 → 0.3.0
+
+
 ## [0.2.0] — 2026-05-03 — "卧槽" 输出质量
 
 The big one. v0.1 had the right plumbing; v0.2 has the right reports.

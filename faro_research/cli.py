@@ -15,7 +15,7 @@ from faro_research.agent import Agent, Message, build_system_prompt
 from faro_research.memory import MemoryStore, make_memory_tools
 from faro_research.providers import make_provider
 from faro_research.skills import make_skill_tool
-from faro_research.tools import ToolRegistry
+from faro_research.tools import ToolRegistry, discover_external_tools
 from faro_research.tools.builtin.tushare import tushare_default_tools, tushare_tools
 
 
@@ -31,6 +31,10 @@ def _build_default_agent(legacy_tools: bool = False) -> Agent:
     if skill is not None:
         reg.register(skill)
     reg.register_many(make_memory_tools(memory))
+    for spec in discover_external_tools():
+        if spec.name in reg:
+            continue
+        reg.register(spec)
     sys_prompt = build_system_prompt(soul=memory.soul(), rules=memory.rules())
     return Agent(provider=provider, tools=reg, system_prompt=sys_prompt)
 

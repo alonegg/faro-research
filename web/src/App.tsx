@@ -11,9 +11,10 @@ import { Markdown } from "./markdown";
 
 const SUGGESTIONS = [
   "贵州茅台 PE_TTM 和近 4 季度 ROE",
-  "宁德时代过去 6 个月有无董监高减持",
-  "比亚迪 2024 vs 2025 营收和归母净利",
-  "中芯国际最新一年现金流量表",
+  "比亚迪 2024 vs 2025 营收对比",
+  "给我写一份宁德时代的深度研报",          // skill: research-report
+  "茅台 DCF 估值合不合理",                  // skill: dcf-cn
+  "记住:我偏好高股息蓝筹, 单股仓位 ≤ 25%",  // memory_update
 ];
 
 interface LiveTool {

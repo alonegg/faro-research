@@ -1,6 +1,6 @@
 [project]
 name = "faro-research"
-version = "0.1.0"
+version = "0.3.0"
 description = "Open-source A-share research agent — pluggable tools + multi-provider LLMs (DeepSeek / OpenAI / Anthropic / Moonshot)."
 license = { text = "MIT" }
 authors = [{ name = "Faro Research contributors" }]
@@ -26,6 +26,9 @@ server = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
 ]
+redis = [
+    "redis>=5.0",
+]
 dev = [
     "ruff>=0.7",
     "pytest>=8.3",
@@ -46,8 +49,14 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["faro_research"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"faro_research/skills/builtin" = "faro_research/skills/builtin"
+# Include non-Python data files (SKILL.md workflows). Without this, hatch
+# only ships .py files; SKILL.md would be missing from a `pip install` wheel
+# and `discover_skills()` would return an empty list.
+[tool.hatch.build]
+include = [
+  "faro_research/**/*.py",
+  "faro_research/skills/builtin/**/*.md",
+]
 
 [tool.ruff]
 line-length = 100

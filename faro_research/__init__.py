@@ -25,7 +25,7 @@ from faro_research.providers import (
 )
 from faro_research.tools import ToolCall, ToolRegistry, ToolResult, ToolSpec
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "Agent", "AgentTrace", "Message", "DEFAULT_SYSTEM_PROMPT",

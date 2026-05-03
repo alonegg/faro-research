@@ -26,13 +26,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from faro_research import __version__
 from faro_research.agent import Agent, Message, build_system_prompt
 from faro_research.audit import SessionStore
 from faro_research.config import settings
 from faro_research.memory import MemoryStore, make_memory_tools
 from faro_research.providers import Provider, make_provider
 from faro_research.skills import make_skill_tool
-from faro_research.tools import ToolRegistry
+from faro_research.tools import ToolRegistry, discover_external_tools
 from faro_research.tools.builtin.tushare import tushare_default_tools
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -47,6 +48,7 @@ def _default_registry(provider: Provider, memory: MemoryStore) -> ToolRegistry:
       1. Tushare meta-tool + get_stock_quote (data)
       2. skill tool (workflows, if any SKILL.md files discovered)
       3. memory_search / memory_get / memory_update (recall)
+      4. External plugins via setuptools entry_points (faro_research.tools group)
     """
     reg = ToolRegistry()
     reg.register_many(tushare_default_tools(provider))
@@ -54,6 +56,11 @@ def _default_registry(provider: Provider, memory: MemoryStore) -> ToolRegistry:
     if skill is not None:
         reg.register(skill)
     reg.register_many(make_memory_tools(memory))
+    # External plugins (e.g. fund/'s portfolio_context + simulate_solver)
+    for spec in discover_external_tools():
+        if spec.name in reg:
+            continue   # don't clobber a builtin with same name
+        reg.register(spec)
     return reg
 
 
@@ -128,7 +135,7 @@ def make_app(
 
     app = FastAPI(
         title="Faro Research",
-        version="0.1.0",
+        version=__version__,
         description="A-share research agent — pluggable tools + SSE streaming.",
     )
     app.add_middleware(
@@ -145,7 +152,7 @@ def make_app(
     def health() -> dict:
         return {
             "status": "ok",
-            "version": "0.1.0",
+            "version": __version__,
             "provider": ag.provider.name,
             "n_tools": len(reg),
         }

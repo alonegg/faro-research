@@ -28,34 +28,19 @@ import time
 from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
-from dataclasses import dataclass
 
+from faro_research.tools.cache import Cache, freeze_args, make_cache
 from faro_research.tools.types import ToolCall, ToolResult, ToolSpec
-
-
-def _freeze_args(args: dict) -> tuple:
-    """Stable hashable key from kwargs for the cache."""
-    def _f(v):
-        if isinstance(v, dict):
-            return tuple(sorted((k, _f(x)) for k, x in v.items()))
-        if isinstance(v, list):
-            return tuple(_f(x) for x in v)
-        return v
-    return tuple(sorted((k, _f(v)) for k, v in args.items()))
-
-
-@dataclass
-class _CacheEntry:
-    output: dict
-    expires_at: float
 
 
 class ToolRegistry:
     """A mutable collection of ToolSpecs keyed by name."""
 
-    def __init__(self, *, max_workers: int = 5) -> None:
+    def __init__(self, *, max_workers: int = 5, cache: Cache | None = None) -> None:
         self._tools: dict[str, ToolSpec] = {}
-        self._cache: dict[tuple, _CacheEntry] = {}
+        # Cache is pluggable: pass `cache=RedisCache(...)` or set FARO_CACHE
+        # env var. Defaults to InMemoryCache.
+        self._cache: Cache = cache or make_cache()
         self._max_workers = max_workers
 
     def register(self, spec: ToolSpec) -> None:
@@ -97,13 +82,12 @@ class ToolRegistry:
         # Cache hit?
         cache_key: tuple | None = None
         if spec.cache_ttl_sec and spec.cache_ttl_sec > 0:
-            cache_key = (name, _freeze_args(arguments))
-            now = time.time()
-            entry = self._cache.get(cache_key)
-            if entry and entry.expires_at > now:
-                fmt = self._format(spec, entry.output, arguments)
+            cache_key = (name, freeze_args(arguments))
+            cached_output = self._cache.get(cache_key)
+            if cached_output is not None:
+                fmt = self._format(spec, cached_output, arguments)
                 return ToolResult(
-                    tool_call_id=call_id, name=name, output=entry.output,
+                    tool_call_id=call_id, name=name, output=cached_output,
                     latency_ms=0.0, error=None, formatted=fmt, cached=True,
                 )
 
@@ -125,10 +109,7 @@ class ToolRegistry:
 
         # Persist to cache only on success
         if cache_key is not None and err is None:
-            self._cache[cache_key] = _CacheEntry(
-                output=output,
-                expires_at=time.time() + spec.cache_ttl_sec,
-            )
+            self._cache.set(cache_key, output, spec.cache_ttl_sec)
 
         fmt = self._format(spec, output, arguments) if err is None else None
         return ToolResult(
