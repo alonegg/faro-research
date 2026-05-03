@@ -1,34 +1,50 @@
 """FastAPI server — sessions, messages, streaming agent calls.
 
-Endpoints:
-    GET  /api/health
-    GET  /api/tools                           — list registered tools
-    GET  /api/sessions                        — list sessions
-    POST /api/sessions                        — create
-    GET  /api/sessions/{id}                   — fetch one + its messages
-    PATCH /api/sessions/{id}                  — rename
+v0.4 endpoints:
+    GET    /api/health
+    GET    /api/tools
+    GET    /api/auth/me                       — current user info
+    POST   /api/auth/users                    — admin-only: mint user + key
+    GET    /api/auth/users                    — admin-only: list
+    GET    /api/sessions                      — list (per-user)
+    POST   /api/sessions
+    GET    /api/sessions/{id}
+    PATCH  /api/sessions/{id}
     DELETE /api/sessions/{id}
-    POST /api/sessions/{id}/ask               — batch
-    POST /api/sessions/{id}/ask/stream        — SSE
-    GET  /api/audit                           — recent events
+    POST   /api/sessions/{id}/ask             — batch
+    POST   /api/sessions/{id}/ask/stream      — SSE
+    GET    /api/sessions/{id}/export.{md,pdf} — research report download
+    GET    /api/audit                         — per-user
 
-All routes share one `Agent`, one `SessionStore`, one `ToolRegistry`.
-Customise the registry by setting `_tool_registry` BEFORE the first request,
-or by importing `make_app(registry=..., agent=...)` from your own bootstrap.
+Auth model:
+  - When `FARO_AUTH_REQUIRED=1` env: every request needs `Authorization: Bearer <api-key>`
+  - Otherwise (v0.3-compat): all requests treated as the sentinel `default` user
+  - Bootstrap admin via `FARO_ADMIN_KEY` env on cold start
+
+Per-user state:
+  - sessions / audit filter by user_id (column added in v0.4 migration)
+  - memory store mounted at `data/memory/{user_id}/` (separate dirs)
+  - agent + memory are cached per-user and lazily built on first hit
+
+Customise via `make_app(registry=..., agent_factory=..., store=...)` from
+your own bootstrap if you need to swap any layer.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import os
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from faro_research import __version__
 from faro_research.agent import Agent, Message, build_system_prompt
 from faro_research.audit import SessionStore
+from faro_research.auth import User, UserStore
 from faro_research.config import settings
 from faro_research.memory import MemoryStore, make_memory_tools
 from faro_research.providers import Provider, make_provider
@@ -36,32 +52,52 @@ from faro_research.skills import make_skill_tool
 from faro_research.tools import ToolRegistry, discover_external_tools
 from faro_research.tools.builtin.tushare import tushare_default_tools
 
+log = logging.getLogger(__name__)
+
+
+def _auth_required() -> bool:
+    return os.getenv("FARO_AUTH_REQUIRED", "").strip() in ("1", "true", "yes")
+
+
 # ────────────────────────────────────────────────────────────────────────────
-# Default singletons — override via `make_app()`
+# Per-user agent factory — caches one Agent per user (memory + tools live here)
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def _default_registry(provider: Provider, memory: MemoryStore) -> ToolRegistry:
-    """Default agent tools.
+class _UserAgentCache:
+    """Lazy-built per-user agent + MemoryStore. Cached for the process lifetime
+    (memory store has its own SQLite connection so re-use across requests is
+    cheap and avoids file locking)."""
 
-    Layers (in order added):
-      1. Tushare meta-tool + get_stock_quote (data)
-      2. skill tool (workflows, if any SKILL.md files discovered)
-      3. memory_search / memory_get / memory_update (recall)
-      4. External plugins via setuptools entry_points (faro_research.tools group)
-    """
-    reg = ToolRegistry()
-    reg.register_many(tushare_default_tools(provider))
-    skill = make_skill_tool()
-    if skill is not None:
-        reg.register(skill)
-    reg.register_many(make_memory_tools(memory))
-    # External plugins (e.g. fund/'s portfolio_context + simulate_solver)
-    for spec in discover_external_tools():
-        if spec.name in reg:
-            continue   # don't clobber a builtin with same name
-        reg.register(spec)
-    return reg
+    def __init__(self, provider: Provider) -> None:
+        self.provider = provider
+        self._cache: dict[str, tuple[MemoryStore, ToolRegistry, Agent]] = {}
+
+    def _build_registry(self, memory: MemoryStore) -> ToolRegistry:
+        reg = ToolRegistry()
+        reg.register_many(tushare_default_tools(self.provider))
+        skill = make_skill_tool()
+        if skill is not None:
+            reg.register(skill)
+        reg.register_many(make_memory_tools(memory))
+        for spec in discover_external_tools():
+            if spec.name in reg:
+                continue
+            reg.register(spec)
+        return reg
+
+    def get(self, user_id: str) -> tuple[MemoryStore, Agent]:
+        if user_id not in self._cache:
+            mem_root = settings.db_path.parent / "memory" / user_id
+            memory = MemoryStore(root=mem_root)
+            registry = self._build_registry(memory)
+            sys_prompt = build_system_prompt(soul=memory.soul(), rules=memory.rules())
+            agent = Agent(
+                provider=self.provider, tools=registry, system_prompt=sys_prompt,
+            )
+            self._cache[user_id] = (memory, registry, agent)
+        memory, _, agent = self._cache[user_id]
+        return memory, agent
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -110,6 +146,23 @@ class MessageOut(BaseModel):
     created_at: str
 
 
+class UserOut(BaseModel):
+    id: str
+    email: str
+    role: str
+    created_at: str
+
+
+class CreateUserBody(BaseModel):
+    email: str = Field(..., min_length=3, max_length=200)
+    role: str = Field(default="user", pattern="^(user|admin)$")
+
+
+class CreateUserResponse(BaseModel):
+    user: UserOut
+    api_key: str   # plaintext, shown ONCE
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # App factory
 # ────────────────────────────────────────────────────────────────────────────
@@ -117,21 +170,13 @@ class MessageOut(BaseModel):
 
 def make_app(
     *,
-    registry: ToolRegistry | None = None,
-    agent: Agent | None = None,
     store: SessionStore | None = None,
+    user_store: UserStore | None = None,
 ) -> FastAPI:
-    """Build a configured FastAPI app. Call this from a custom bootstrap to
-    inject your own tool registry / agent / store.
-
-    For zero-config use, `from faro_research.server.app import app` works
-    (it calls `make_app()` with defaults at import time)."""
     provider = make_provider()
-    memory = MemoryStore()
-    reg = registry or _default_registry(provider, memory)
-    sys_prompt = build_system_prompt(soul=memory.soul(), rules=memory.rules())
-    ag = agent or Agent(provider=provider, tools=reg, system_prompt=sys_prompt)
     st = store or SessionStore()
+    us = user_store or UserStore()
+    cache = _UserAgentCache(provider)
 
     app = FastAPI(
         title="Faro Research",
@@ -146,6 +191,29 @@ def make_app(
         allow_headers=["*"],
     )
 
+    # ── auth dependency ────────────────────────────────────────────────
+
+    def current_user(authorization: str | None = Header(default=None)) -> User:
+        """Resolve the request's user.
+
+        - FARO_AUTH_REQUIRED unset: always returns the `default` user
+        - Required: parses Bearer token; 401 on missing / invalid
+        """
+        if not _auth_required():
+            return us.get_default()
+        if not authorization or not authorization.lower().startswith("bearer "):
+            raise HTTPException(401, "missing Bearer token in Authorization header")
+        token = authorization.split(None, 1)[1].strip()
+        user = us.lookup_by_key(token)
+        if user is None:
+            raise HTTPException(401, "invalid api key")
+        return user
+
+    def admin_user(user: User = Depends(current_user)) -> User:
+        if user.role != "admin":
+            raise HTTPException(403, "admin only")
+        return user
+
     # ── meta ────────────────────────────────────────────────────────────
 
     @app.get("/api/health")
@@ -153,33 +221,63 @@ def make_app(
         return {
             "status": "ok",
             "version": __version__,
-            "provider": ag.provider.name,
-            "n_tools": len(reg),
+            "provider": provider.name,
+            "auth_required": _auth_required(),
         }
 
+    @app.get("/api/auth/me", response_model=UserOut)
+    def me(user: User = Depends(current_user)) -> UserOut:
+        return UserOut(
+            id=user.id, email=user.email, role=user.role,
+            created_at=user.created_at.isoformat(),
+        )
+
+    @app.get("/api/auth/users", response_model=list[UserOut])
+    def list_users(_admin: User = Depends(admin_user)) -> list[UserOut]:
+        return [
+            UserOut(id=u.id, email=u.email, role=u.role,
+                    created_at=u.created_at.isoformat())
+            for u in us.list_users()
+        ]
+
+    @app.post("/api/auth/users", response_model=CreateUserResponse)
+    def create_user(body: CreateUserBody,
+                    _admin: User = Depends(admin_user)) -> CreateUserResponse:
+        user, key = us.create_user(email=body.email, role=body.role)
+        return CreateUserResponse(
+            user=UserOut(
+                id=user.id, email=user.email, role=user.role,
+                created_at=user.created_at.isoformat(),
+            ),
+            api_key=key,
+        )
+
     @app.get("/api/tools", response_model=list[ToolInfo])
-    def list_tools() -> list[ToolInfo]:
+    def list_tools(user: User = Depends(current_user)) -> list[ToolInfo]:
+        # Build the user's registry (cheap if cached)
+        _, agent = cache.get(user.id)
         return [
             ToolInfo(name=s.name, description=s.description, parameters=s.parameters)
-            for s in reg.specs()
+            for s in agent.tools.specs()
         ]
 
     # ── sessions ────────────────────────────────────────────────────────
 
     @app.get("/api/sessions", response_model=list[SessionOut])
-    def list_sessions() -> list[SessionOut]:
+    def list_sessions(user: User = Depends(current_user)) -> list[SessionOut]:
         return [
             SessionOut(
                 id=s.id, title=s.title,
                 created_at=s.created_at.isoformat(),
                 updated_at=s.updated_at.isoformat(),
             )
-            for s in st.list_sessions()
+            for s in st.list_sessions(user_id=user.id)
         ]
 
     @app.post("/api/sessions", response_model=SessionOut)
-    def create_session(body: CreateSessionBody) -> SessionOut:
-        s = st.create_session(title=body.title)
+    def create_session(body: CreateSessionBody,
+                       user: User = Depends(current_user)) -> SessionOut:
+        s = st.create_session(title=body.title, user_id=user.id)
         return SessionOut(
             id=s.id, title=s.title,
             created_at=s.created_at.isoformat(),
@@ -187,8 +285,9 @@ def make_app(
         )
 
     @app.get("/api/sessions/{session_id}")
-    def get_session(session_id: str) -> dict:
-        s = st.get_session(session_id)
+    def get_session(session_id: str,
+                    user: User = Depends(current_user)) -> dict:
+        s = st.get_session(session_id, user_id=user.id)
         if not s:
             raise HTTPException(404, f"session {session_id} not found")
         msgs = [
@@ -209,10 +308,11 @@ def make_app(
         }
 
     @app.patch("/api/sessions/{session_id}", response_model=SessionOut)
-    def rename_session(session_id: str, body: RenameBody) -> SessionOut:
-        s = st.rename_session(session_id, body.title)
-        if not s:
+    def rename_session(session_id: str, body: RenameBody,
+                       user: User = Depends(current_user)) -> SessionOut:
+        if not st.get_session(session_id, user_id=user.id):
             raise HTTPException(404, f"session {session_id} not found")
+        s = st.rename_session(session_id, body.title)
         return SessionOut(
             id=s.id, title=s.title,
             created_at=s.created_at.isoformat(),
@@ -220,22 +320,16 @@ def make_app(
         )
 
     @app.delete("/api/sessions/{session_id}")
-    def delete_session(session_id: str) -> dict:
-        ok = st.delete_session(session_id)
-        if not ok:
+    def delete_session(session_id: str,
+                       user: User = Depends(current_user)) -> dict:
+        if not st.get_session(session_id, user_id=user.id):
             raise HTTPException(404, f"session {session_id} not found")
+        st.delete_session(session_id)
         return {"deleted": session_id}
 
     # ── ask (batch + stream) ────────────────────────────────────────────
 
     def _load_history(session_id: str) -> list[Message]:
-        """Convert stored messages → agent's Message format.
-
-        We only round-trip user+assistant text, intentionally dropping prior
-        tool_calls / tool_results: those are baked into the assistant's final
-        answer text, and replaying them on a new turn would (a) need provider
-        tool IDs we don't persist, (b) burn context for no benefit.
-        """
         out: list[Message] = []
         for m in st.list_messages(session_id):
             if m.role not in ("user", "assistant"):
@@ -248,7 +342,8 @@ def make_app(
 
     def _persist_final(session_id: str, query: str, answer: str,
                        tool_calls: list[dict], turns: int,
-                       latency_ms: float, error: str | None) -> None:
+                       latency_ms: float, error: str | None,
+                       user_id: str) -> None:
         st.append_message(session_id, "assistant", answer, meta={
             "turns": turns,
             "tool_calls": tool_calls,
@@ -264,30 +359,35 @@ def make_app(
                 "turns": turns, "tools": [t["name"] for t in tool_calls],
                 "latency_total_ms": latency_ms, "error": error,
             },
+            user_id=user_id,
         )
 
     @app.post("/api/sessions/{session_id}/ask", response_model=AskResponse)
-    def ask(session_id: str, body: AskBody) -> AskResponse:
-        if not st.get_session(session_id):
+    def ask(session_id: str, body: AskBody,
+            user: User = Depends(current_user)) -> AskResponse:
+        if not st.get_session(session_id, user_id=user.id):
             raise HTTPException(404, f"session {session_id} not found")
         _persist_user(session_id, body.query)
         history = _load_history(session_id)
+        _, agent = cache.get(user.id)
         try:
-            trace = ag.run(history)
+            trace = agent.run(history)
         except Exception as e:
             raise HTTPException(500, f"agent failed: {type(e).__name__}: {e}") from e
         _persist_final(
             session_id, body.query, trace.final_answer, trace.tool_calls,
-            trace.turns, trace.latency_total_ms, trace.error,
+            trace.turns, trace.latency_total_ms, trace.error, user.id,
         )
         return AskResponse(**trace.to_dict())
 
     @app.post("/api/sessions/{session_id}/ask/stream")
-    def ask_stream(session_id: str, body: AskBody) -> StreamingResponse:
-        if not st.get_session(session_id):
+    def ask_stream(session_id: str, body: AskBody,
+                   user: User = Depends(current_user)) -> StreamingResponse:
+        if not st.get_session(session_id, user_id=user.id):
             raise HTTPException(404, f"session {session_id} not found")
         _persist_user(session_id, body.query)
         history = _load_history(session_id)
+        _, agent = cache.get(user.id)
 
         def gen():
             final_answer = ""
@@ -296,7 +396,7 @@ def make_app(
             latency = 0.0
             error: str | None = None
             try:
-                for ev in ag.stream(history):
+                for ev in agent.stream(history):
                     if ev["type"] == "final":
                         final_answer = ev["answer"]
                         turns = ev["turns"]
@@ -315,7 +415,7 @@ def make_app(
                 _persist_final(
                     session_id, body.query,
                     final_answer or (f"agent failed: {error}" if error else ""),
-                    tool_calls, turns, latency, error,
+                    tool_calls, turns, latency, error, user.id,
                 )
                 yield "event: done\ndata: {}\n\n"
 
@@ -325,17 +425,61 @@ def make_app(
             headers={"cache-control": "no-cache", "x-accel-buffering": "no"},
         )
 
+    # ── export (md + pdf) ──────────────────────────────────────────────
+
+    @app.get("/api/sessions/{session_id}/export.{fmt}")
+    def export_session(
+        session_id: str, fmt: str,
+        user: User = Depends(current_user),
+    ):
+        from urllib.parse import quote
+
+        from faro_research.export import markdown_to_pdf, session_to_markdown
+        if not st.get_session(session_id, user_id=user.id):
+            raise HTTPException(404, f"session {session_id} not found")
+        s = st.get_session(session_id)
+        msgs = st.list_messages(session_id)
+        md = session_to_markdown(s, msgs)
+
+        # Filename: ASCII-safe fallback + RFC 5987 (UTF-8) extended form for
+        # Chinese titles. Browsers prefer the UTF-8 form when present.
+        title = s.title or "session"
+        ascii_safe = "".join(
+            c if c.isascii() and (c.isalnum() or c in "-_") else "_"
+            for c in title
+        )[:40].strip("_") or session_id
+        utf8_quoted = quote(title, safe="")
+        cd = (f'attachment; filename="{ascii_safe}.{fmt}"; '
+              f"filename*=UTF-8''{utf8_quoted}.{fmt}")
+
+        if fmt == "md":
+            return Response(
+                content=md, media_type="text/markdown; charset=utf-8",
+                headers={"content-disposition": cd},
+            )
+        if fmt == "pdf":
+            try:
+                pdf_bytes = markdown_to_pdf(md, title=s.title)
+            except RuntimeError as e:
+                raise HTTPException(500, str(e)) from e
+            return Response(
+                content=pdf_bytes, media_type="application/pdf",
+                headers={"content-disposition": cd},
+            )
+        raise HTTPException(400, f"unsupported format: {fmt!r} (use md or pdf)")
+
     # ── audit ───────────────────────────────────────────────────────────
 
     @app.get("/api/audit")
-    def list_audit(limit: int = 100, action: str | None = None) -> list[dict]:
+    def list_audit(limit: int = 100, action: str | None = None,
+                   user: User = Depends(current_user)) -> list[dict]:
         return [
             {
                 "id": e.id, "ts": e.ts.isoformat(), "session_id": e.session_id,
                 "action": e.action, "note": e.note,
                 "payload": json.loads(e.payload_json) if e.payload_json else {},
             }
-            for e in st.list_audit(limit=limit, action=action)
+            for e in st.list_audit(limit=limit, action=action, user_id=user.id)
         ]
 
     return app

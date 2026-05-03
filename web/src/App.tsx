@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import {
   api,
   askStream,
+  getApiKey,
+  setApiKey,
+  type MeResponse,
   type PersistedMessage,
   type ResearchStreamEvent,
   type SessionMeta,
@@ -41,8 +44,8 @@ interface UITurn {
 
 interface ServerInfo {
   provider: string;
-  n_tools: number;
   version: string;
+  auth_required: boolean;
 }
 
 export function App() {
@@ -53,15 +56,36 @@ export function App() {
   const [input, setInput] = useState("");
   const [running, setRunning] = useState(false);
   const [info, setInfo] = useState<ServerInfo | null>(null);
+  const [me, setMe] = useState<MeResponse | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
   const nextTurnId = useRef(1);
   const tickRef = useRef<number | null>(null);
   const threadRef = useRef<HTMLDivElement>(null);
 
   // ── boot ──────────────────────────────────────────────────────────
   useEffect(() => {
-    api.health().then((h) => setInfo({ provider: h.provider, n_tools: h.n_tools, version: h.version }))
-      .catch(() => {});
-    api.listSessions().then(setSessions).catch(() => {});
+    let cancelled = false;
+    (async () => {
+      try {
+        const h = await api.health();
+        if (cancelled) return;
+        setInfo({ provider: h.provider, version: h.version, auth_required: h.auth_required });
+      } catch {
+        return;
+      }
+      try {
+        const m = await api.me();
+        if (cancelled) return;
+        setMe(m);
+        setAuthError(null);
+        const ss = await api.listSessions();
+        if (!cancelled) setSessions(ss);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (!cancelled) setAuthError(msg);
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   // ── load active session messages ──────────────────────────────────
@@ -199,6 +223,14 @@ export function App() {
   };
 
   // ── render ────────────────────────────────────────────────────────
+
+  // Auth gate — only blocks when server requires auth AND we don't have a
+  // valid key (or the saved one was rejected with 401).
+  const showAuthModal = info?.auth_required && (!me || !!authError) && !!info;
+  if (showAuthModal) {
+    return <AuthModal onSubmit={(key) => { setApiKey(key); location.reload(); }} />;
+  }
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -243,12 +275,24 @@ export function App() {
       <div className="main">
         <header className="topbar">
           <span className="topbar__title">A 股研究助手</span>
-          <span className="topbar__sub">DeepSeek + Tushare · 工具可插拔</span>
+          <span className="topbar__sub">{info?.provider ?? "—"} · 工具可插拔</span>
           {info && (
             <span className="topbar__pill">
               <span className="dot" />
-              {info.provider} · {info.n_tools} tools · v{info.version}
+              {info.provider} · v{info.version}
+              {info.auth_required ? ` · ${me?.email ?? "?"}` : ""}
             </span>
+          )}
+          {info?.auth_required && me && (
+            <button
+              className="btn btn--ghost"
+              style={{ fontSize: 11, padding: "3px 8px" }}
+              onClick={() => {
+                if (!confirm("退出当前 API key?")) return;
+                setApiKey("");
+                location.reload();
+              }}
+            >退出</button>
           )}
         </header>
 
@@ -270,11 +314,11 @@ export function App() {
 
           {/* Persisted history (loaded from server) */}
           {history.map((m) => (
-            <PersistedMessageView key={m.seq} m={m} />
+            <PersistedMessageView key={m.seq} m={m} sessionId={activeId} />
           ))}
 
           {/* Live turns */}
-          {turns.map((t) => <TurnView key={t.id} turn={t} />)}
+          {turns.map((t) => <TurnView key={t.id} turn={t} sessionId={activeId} />)}
         </div>
 
         <div className="composer">
@@ -309,7 +353,25 @@ export function App() {
 // Render helpers
 // ──────────────────────────────────────────────────────────────────────────
 
-function PersistedMessageView({ m }: { m: PersistedMessage }) {
+function ExportButtons({ sessionId }: { sessionId: string | null }) {
+  if (!sessionId) return null;
+  return (
+    <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+      <button
+        className="btn btn--ghost"
+        style={{ fontSize: 11, padding: "3px 8px" }}
+        onClick={() => api.download(sessionId, "md").catch((e) => alert(`导出失败: ${e}`))}
+      >下载 Markdown</button>
+      <button
+        className="btn btn--ghost"
+        style={{ fontSize: 11, padding: "3px 8px" }}
+        onClick={() => api.download(sessionId, "pdf").catch((e) => alert(`导出失败: ${e}`))}
+      >下载 PDF</button>
+    </div>
+  );
+}
+
+function PersistedMessageView({ m, sessionId }: { m: PersistedMessage; sessionId: string | null }) {
   if (m.role === "user") {
     return <div className="user-bubble">{m.content}</div>;
   }
@@ -338,13 +400,14 @@ function PersistedMessageView({ m }: { m: PersistedMessage }) {
             <span>{((meta.latency_total_ms ?? 0) / 1000).toFixed(1)} s</span>
           </div>
         )}
+        <ExportButtons sessionId={sessionId} />
       </>
     );
   }
   return null;  // skip system / tool rows
 }
 
-function TurnView({ turn }: { turn: UITurn }) {
+function TurnView({ turn, sessionId }: { turn: UITurn; sessionId: string | null }) {
   const isPending = turn.status === "pending";
   return (
     <>
@@ -368,6 +431,7 @@ function TurnView({ turn }: { turn: UITurn }) {
             <span>{turn.finalToolCalls?.length ?? 0} tool calls</span>
             <span>{((turn.latencyTotalMs ?? 0) / 1000).toFixed(1)} s</span>
           </div>
+          <ExportButtons sessionId={sessionId} />
         </>
       )}
     </>
@@ -400,5 +464,58 @@ function ToolsTrace({ tools, expanded }: { tools: LiveTool[]; expanded: boolean 
         );
       })}
     </details>
+  );
+}
+
+function AuthModal({ onSubmit }: { onSubmit: (key: string) => void }) {
+  const [key, setKey] = useState(getApiKey());
+  const [submitting, setSubmitting] = useState(false);
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+    }}>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!key.trim()) return;
+          setSubmitting(true);
+          onSubmit(key.trim());
+        }}
+        style={{
+          background: "var(--surface)", padding: 28, borderRadius: 12,
+          maxWidth: 460, width: "90%",
+          boxShadow: "0 20px 60px rgba(0,0,0,0.2)",
+          display: "flex", flexDirection: "column", gap: 12,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span className="sidebar__brand-mark">F</span>
+          <h2 style={{ margin: 0, fontSize: 18 }}>Faro Research 登录</h2>
+        </div>
+        <p style={{ margin: 0, color: "var(--ink-2)", fontSize: 13 }}>
+          服务端启用了 <code>FARO_AUTH_REQUIRED</code>。粘贴你的 API key
+          (从管理员处获得; 形如 <code>fr-xxx...</code>)。
+        </p>
+        <input
+          type="password"
+          autoFocus
+          required
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
+          placeholder="fr-..."
+          style={{
+            padding: "10px 12px", border: "1px solid var(--border)",
+            borderRadius: 8, fontSize: 13, fontFamily: "ui-monospace, monospace",
+          }}
+        />
+        <button type="submit" className="btn btn--primary" disabled={!key.trim() || submitting}>
+          {submitting ? "验证中..." : "登录"}
+        </button>
+        <p style={{ margin: 0, color: "var(--ink-3)", fontSize: 11 }}>
+          API key 仅存在你浏览器的 localStorage; 不会上传到第三方。
+        </p>
+      </form>
+    </div>
   );
 }

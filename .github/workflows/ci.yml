@@ -24,10 +24,10 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install package (server extra)
+      - name: Install package (server + export + dev extras)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[server,dev]"
+          pip install -e ".[server,export,dev]"
 
       - name: Ruff lint
         run: ruff check faro_research
@@ -78,12 +78,41 @@ jobs:
           # 5. Agent constructs
           assert Agent(p, reg2).max_turns == 8
 
-          # 6. Session store
+          # 6. Session store (with v0.4 user_id scoping)
           st = SessionStore()
-          s = st.create_session(title="ci")
+          s = st.create_session(title="ci", user_id="default")
           st.append_message(s.id, "user", "hello")
           assert len(st.list_messages(s.id)) == 1
+          # Foreign-user lookup must return None
+          assert st.get_session(s.id, user_id="other") is None
           assert st.delete_session(s.id) is True
+
+          # 7. v0.4 auth — UserStore + lookup
+          from faro_research.auth import UserStore
+          us = UserStore()
+          default = us.get_default()
+          assert default.id == "default"
+          user, key = us.create_user(email="ci@test", role="user")
+          assert key.startswith("fr-")
+          assert us.lookup_by_key(key).id == user.id
+
+          # 8. v0.4 export — markdown + PDF
+          from faro_research.export import session_to_markdown, markdown_to_pdf
+          from faro_research.audit.store import ChatSession, ChatMessage
+          import datetime
+          fake_s = ChatSession(id="s-x", user_id="default", title="ci report",
+                               created_at=datetime.datetime.now(),
+                               updated_at=datetime.datetime.now())
+          fake_msgs = [
+              ChatMessage(session_id="s-x", seq=0, role="user", content="test query"),
+              ChatMessage(session_id="s-x", seq=1, role="assistant",
+                          content="## answer\n\n| a | b |\n|---|---|\n| 1 | 2 |"),
+          ]
+          md = session_to_markdown(fake_s, fake_msgs)
+          assert "ci report" in md and "test query" in md
+          pdf = markdown_to_pdf(md, title="ci report")
+          assert pdf[:5] == b"%PDF-", pdf[:20]
+          assert len(pdf) > 1000
 
           print("smoke ok")
           PY

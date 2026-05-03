@@ -3,11 +3,18 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# System deps: gcc for pycairo (xhtml2pdf transitive); cairo / pango for the
+# rendering pipeline. Without these the [export] extra fails to build.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        build-essential pkg-config libcairo2-dev libpango1.0-dev \
+ && rm -rf /var/lib/apt/lists/*
+
 # Install only what we need — pyproject + source — to maximise layer caching
 COPY pyproject.toml README.md LICENSE ./
 COPY faro_research ./faro_research
 
-RUN pip install --no-cache-dir -e ".[server]"
+RUN pip install --no-cache-dir -e ".[server,export]"
 
 # Persisted state lands here (mounted as volume in compose)
 RUN mkdir -p /app/data

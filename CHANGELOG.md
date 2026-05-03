@@ -4,6 +4,55 @@ All notable changes to **Faro Research** are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [SemVer](https://semver.org).
 
+## [0.4.0] — 2026-05-03 — 多用户 + 研报导出
+
+从单租户工具变成可以"挂出去给别人用"的产品。
+
+### Added — 多用户
+
+- **User 模型** (`faro_research.auth.User`): id / email / api_key_hash / role
+- **API key 鉴权** (`Authorization: Bearer <key>`):
+  - `FARO_AUTH_REQUIRED=1` 启用; 未设时退回 v0.3 单租户(向后兼容)
+  - `FARO_ADMIN_KEY=<key>` 在 cold start 自动 bootstrap admin
+  - 服务端 hash 用 HMAC-SHA256 + `FARO_AUTH_SECRET` (env 可显式设, 默认从 db_path 派生)
+- **新管理端点**:
+  - `GET /api/auth/me` — 当前用户信息
+  - `GET /api/auth/users` — admin only, 列用户
+  - `POST /api/auth/users` — admin only, 建用户 + 返回 plaintext API key (仅显示一次)
+- **Per-user 数据隔离**:
+  - `ChatSession`、`AuditEvent` 加 `user_id` 列 (idempotent ALTER 迁移 v0.3 → v0.4)
+  - `MemoryStore` 自动按 user_id 挂目录: `data/memory/{user_id}/`
+  - SOUL.md / RULES.md 随之 per-user
+  - 一个内存级缓存 `_UserAgentCache` 让每个用户的 agent + 工具栈懒构建一次
+
+### Added — PDF 研报导出
+
+- **新模块** `faro_research.export`:
+  - `session_to_markdown(session, messages)` — 会话 → 中文研报 markdown
+  - `markdown_to_pdf(md, title=...)` — 纯 Python pipeline (xhtml2pdf), 0 系统依赖
+- **新端点** `GET /api/sessions/{id}/export.{md,pdf}`:
+  - md: 直接下载
+  - pdf: A4 横排 + 中文字体, ~3-10KB / 会话, 适合分享
+  - Content-Disposition 走 RFC 5987 (UTF-8 文件名 + ASCII fallback)
+- **Optional extra** `pip install "faro-research[export]"` 装 xhtml2pdf
+- 前端: 每条 assistant 答案下加"下载 Markdown / 下载 PDF"按钮
+
+### Added — 前端
+- API key 登录 modal (FARO_AUTH_REQUIRED=true 时拦截)
+- localStorage 存 key, 每个 fetch 自动加 Authorization 头
+- topbar 显示当前用户 email + 退出按钮
+
+### Changed
+- Server `make_app()` 签名: 现在接受 `user_store=` 注入点
+- Default LLM 演示 .env 切换到 MiniMax-M2.7 via Volcengine Ark (国内可用 + 推理能力强)
+
+### Migration (v0.3 → v0.4)
+- 完全向后兼容: 不设 FARO_AUTH_REQUIRED 时所有现有数据归到 sentinel `default` 用户
+- v0.3 sessions / audit 在第一次启动时自动 ALTER TABLE 加 user_id='default'
+- v0.3 memory 默认目录 `data/memory/` 仍然可用 (会被 default 用户读到)
+  - 多用户后可手动 mv data/memory/* data/memory/default/
+
+
 ## [0.3.0] — 2026-05-03 — 生态扩展
 
 让别人能 `pip install + 用上`,而不只是 fork 改源码。

@@ -37,8 +37,29 @@ export interface ToolInfo {
   parameters: Record<string, unknown>;
 }
 
+// API key persisted in localStorage; sent as Bearer on every request.
+// In auth-disabled deployments (FARO_AUTH_REQUIRED unset on backend) the
+// header is ignored; in auth-required deployments, missing/invalid → 401.
+const API_KEY_STORAGE = "faro_api_key";
+
+export function getApiKey(): string {
+  return localStorage.getItem(API_KEY_STORAGE) || "";
+}
+
+export function setApiKey(key: string): void {
+  if (key) localStorage.setItem(API_KEY_STORAGE, key);
+  else localStorage.removeItem(API_KEY_STORAGE);
+}
+
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const h: Record<string, string> = { ...(extra || {}) };
+  const k = getApiKey();
+  if (k) h["authorization"] = `Bearer ${k}`;
+  return h;
+}
+
 async function jget<T>(path: string): Promise<T> {
-  const r = await fetch(`/api${path}`);
+  const r = await fetch(`/api${path}`, { headers: authHeaders() });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
   return r.json() as Promise<T>;
 }
@@ -46,33 +67,67 @@ async function jget<T>(path: string): Promise<T> {
 async function jpost<T>(path: string, body: unknown): Promise<T> {
   const r = await fetch(`/api${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: authHeaders({ "content-type": "application/json" }),
     body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
   return r.json() as Promise<T>;
 }
 
+export interface MeResponse {
+  id: string;
+  email: string;
+  role: string;
+  created_at: string;
+}
+
+export interface HealthResponse {
+  status: string;
+  version: string;
+  provider: string;
+  auth_required: boolean;
+}
+
 export const api = {
-  health: () => jget<{ status: string; version: string; provider: string; n_tools: number }>("/health"),
+  health: () => jget<HealthResponse>("/health"),
+  me: () => jget<MeResponse>("/auth/me"),
   tools: () => jget<ToolInfo[]>("/tools"),
   listSessions: () => jget<SessionMeta[]>("/sessions"),
   createSession: (title?: string) => jpost<SessionMeta>("/sessions", { title }),
-  getSession: (id: string) => jget<{ session: SessionMeta; messages: PersistedMessage[] }>(`/sessions/${id}`),
+  getSession: (id: string) =>
+    jget<{ session: SessionMeta; messages: PersistedMessage[] }>(`/sessions/${id}`),
   rename: (id: string, title: string) =>
     fetch(`/api/sessions/${id}`, {
       method: "PATCH",
-      headers: { "content-type": "application/json" },
+      headers: authHeaders({ "content-type": "application/json" }),
       body: JSON.stringify({ title }),
     }).then(async (r) => {
       if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
       return r.json() as Promise<SessionMeta>;
     }),
   deleteSession: (id: string) =>
-    fetch(`/api/sessions/${id}`, { method: "DELETE" }).then(async (r) => {
-      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
-      return r.json();
-    }),
+    fetch(`/api/sessions/${id}`, { method: "DELETE", headers: authHeaders() })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+        return r.json();
+      }),
+  /** Triggers a browser download. Returns the URL we'd hit (useful for a tags). */
+  exportUrl: (id: string, fmt: "md" | "pdf") => `/api/sessions/${id}/export.${fmt}`,
+  download: async (id: string, fmt: "md" | "pdf") => {
+    const r = await fetch(`/api/sessions/${id}/export.${fmt}`, { headers: authHeaders() });
+    if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+    const blob = await r.blob();
+    const cd = r.headers.get("content-disposition") || "";
+    const m = cd.match(/filename\*=UTF-8''([^;]+)/i) || cd.match(/filename="([^"]+)"/);
+    const filename = m ? decodeURIComponent(m[1]) : `${id}.${fmt}`;
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  },
 };
 
 export type ResearchStreamEvent =
@@ -98,6 +153,7 @@ export type ResearchStreamEvent =
 
 /** Stream the agent's response. EventSource doesn't support POST, so we
  *  manually parse SSE off a fetch ReadableStream. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function askStream(
   sessionId: string,
   query: string,
@@ -106,7 +162,10 @@ export async function askStream(
 ): Promise<void> {
   const r = await fetch(`/api/sessions/${sessionId}/ask/stream`, {
     method: "POST",
-    headers: { "content-type": "application/json", accept: "text/event-stream" },
+    headers: authHeaders({
+      "content-type": "application/json",
+      accept: "text/event-stream",
+    }),
     body: JSON.stringify({ query }),
     signal,
   });

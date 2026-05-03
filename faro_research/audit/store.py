@@ -39,6 +39,7 @@ class ChatSession(SQLModel, table=True):
     __tablename__ = "session"
 
     id: str = Field(primary_key=True, max_length=32)
+    user_id: str = Field(default="default", index=True, max_length=32)
     title: str = Field(default="新会话", max_length=200)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
@@ -63,6 +64,7 @@ class AuditEvent(SQLModel, table=True):
 
     id: int | None = Field(default=None, primary_key=True)
     ts: datetime = Field(default_factory=_utcnow, index=True)
+    user_id: str = Field(default="default", index=True, max_length=32)
     session_id: str | None = Field(default=None, index=True, max_length=32)
     action: str = Field(max_length=64, index=True)   # research_query | tool_call | error
     note: str | None = None
@@ -76,7 +78,14 @@ class AuditEvent(SQLModel, table=True):
 
 class SessionStore:
     """Thin sync wrapper around the engine. Caller responsible for using
-    short-lived `Session` instances (one per request)."""
+    short-lived `Session` instances (one per request).
+
+    v0.4: All session / audit operations accept an optional `user_id`. When
+    omitted, falls back to the sentinel `"default"` user (single-tenant
+    back-compat with v0.3 deployments).
+    """
+
+    DEFAULT_USER_ID = "default"
 
     def __init__(self, db_path: Path | None = None) -> None:
         path = db_path or settings.db_path
@@ -87,26 +96,55 @@ class SessionStore:
             connect_args={"check_same_thread": False},
         )
         SQLModel.metadata.create_all(self.engine)
+        self._migrate_user_id_columns()
+
+    def _migrate_user_id_columns(self) -> None:
+        """Idempotent ALTER TABLE for v0.3 → v0.4 schema bump."""
+        from sqlalchemy import text
+        with self.engine.begin() as conn:
+            for table in ("session", "audit_event"):
+                try:
+                    conn.execute(text(
+                        f"ALTER TABLE {table} ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default'"
+                    ))
+                except Exception:
+                    # Column already exists on previously-migrated DB
+                    pass
 
     # ── sessions ────────────────────────────────────────────────────────
 
-    def create_session(self, title: str | None = None) -> ChatSession:
-        s = ChatSession(id=_new_id("s"), title=title or "新会话")
+    def create_session(self, title: str | None = None,
+                       user_id: str = DEFAULT_USER_ID) -> ChatSession:
+        s = ChatSession(
+            id=_new_id("s"), title=title or "新会话", user_id=user_id,
+        )
         with Session(self.engine) as db:
             db.add(s)
             db.commit()
             db.refresh(s)
         return s
 
-    def list_sessions(self, limit: int = 50) -> list[ChatSession]:
+    def list_sessions(self, limit: int = 50,
+                      user_id: str = DEFAULT_USER_ID) -> list[ChatSession]:
         with Session(self.engine) as db:
             return db.exec(
-                select(ChatSession).order_by(ChatSession.updated_at.desc()).limit(limit)
+                select(ChatSession)
+                .where(ChatSession.user_id == user_id)
+                .order_by(ChatSession.updated_at.desc())
+                .limit(limit)
             ).all()
 
-    def get_session(self, session_id: str) -> ChatSession | None:
+    def get_session(self, session_id: str,
+                    user_id: str | None = None) -> ChatSession | None:
+        """If `user_id` is given, also enforces ownership (returns None if
+        the session belongs to a different user — caller treats as 404)."""
         with Session(self.engine) as db:
-            return db.get(ChatSession, session_id)
+            s = db.get(ChatSession, session_id)
+            if s is None:
+                return None
+            if user_id is not None and s.user_id != user_id:
+                return None
+            return s
 
     def delete_session(self, session_id: str) -> bool:
         with Session(self.engine) as db:
@@ -188,10 +226,12 @@ class SessionStore:
         session_id: str | None = None,
         note: str | None = None,
         payload: dict | None = None,
+        user_id: str = DEFAULT_USER_ID,
     ) -> None:
         try:
             with Session(self.engine) as db:
                 db.add(AuditEvent(
+                    user_id=user_id,
                     session_id=session_id,
                     action=action,
                     note=(note or "")[:500],
@@ -202,9 +242,12 @@ class SessionStore:
             # Audit write must never fail the agent run
             pass
 
-    def list_audit(self, limit: int = 100, action: str | None = None) -> list[AuditEvent]:
+    def list_audit(self, limit: int = 100, action: str | None = None,
+                   user_id: str | None = None) -> list[AuditEvent]:
         with Session(self.engine) as db:
             q = select(AuditEvent).order_by(AuditEvent.ts.desc()).limit(limit)
+            if user_id is not None:
+                q = q.where(AuditEvent.user_id == user_id)
             if action:
                 q = q.where(AuditEvent.action == action)
             return db.exec(q).all()
