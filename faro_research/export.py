@@ -199,9 +199,27 @@ def _is_block_start(line: str) -> bool:
     return False
 
 
+_CJK_FONTS_REGISTERED = False
+
+
+def _ensure_cjk_fonts() -> None:
+    """Register STSong-Light (reportlab's bundled Chinese CIDFont) so that
+    Chinese chars render to glyphs instead of empty boxes. Idempotent."""
+    global _CJK_FONTS_REGISTERED
+    if _CJK_FONTS_REGISTERED:
+        return
+    try:
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+        pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+        _CJK_FONTS_REGISTERED = True
+    except Exception as e:
+        log.warning("CJK font registration failed (%s); 中文将无法显示", e)
+
+
 _PDF_CSS = """
 @page { size: A4; margin: 1.6cm 1.8cm; }
-body { font-family: 'Helvetica', 'PingFang SC', 'STHeiti', sans-serif;
+body { font-family: 'STSong-Light', 'Helvetica', sans-serif;
        font-size: 10pt; line-height: 1.55; color: #1d1c19; }
 h1 { font-size: 18pt; margin: 0 0 6pt; }
 h2 { font-size: 14pt; margin: 14pt 0 4pt; color: #2a2823; }
@@ -230,6 +248,7 @@ def markdown_to_pdf(md: str, *, title: str | None = None) -> bytes:
             "PDF export requires xhtml2pdf. Install via "
             '`pip install "faro-research[export]"`'
         ) from e
+    _ensure_cjk_fonts()
 
     body_html = _markdown_to_html(md)
     full_html = (
